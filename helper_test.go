@@ -185,13 +185,35 @@ func TestMGetCache(t *testing.T) {
 			}
 			m.DoMultiFn = func(cmd ...Completed) *redisresults {
 				result := make([]RedisResult, len(cmd))
-				for i, key := range keys {
-					if !reflect.DeepEqual(cmd[i].Commands(), []string{"GET", key}) {
-						t.Fatalf("unexpected command %v", cmd)
+				// Track which keys we've seen to ensure all keys are present
+				seenKeys := make(map[string]bool)
+				
+				for i, c := range cmd {
+					// Each command should be an MGET with one or more keys
+					cmdParts := c.Commands()
+					if cmdParts[0] != "MGET" {
+						t.Fatalf("expected MGET command, got %v", cmdParts[0])
 						return nil
 					}
-					result[i] = newResult(strmsg('+', key), nil)
+					
+					// Build response array for this MGET
+					mgetKeys := cmdParts[1:]
+					arr := make([]RedisMessage, len(mgetKeys))
+					for j, key := range mgetKeys {
+						arr[j] = strmsg('+', key)
+						seenKeys[key] = true
+					}
+					result[i] = newResult(slicemsg('*', arr), nil)
 				}
+				
+				// Ensure all keys were seen
+				for _, key := range keys {
+					if !seenKeys[key] {
+						t.Fatalf("key %s was not included in any MGET command", key)
+						return nil
+					}
+				}
+				
 				return &redisresults{s: result}
 			}
 			v, err := MGetCache(disabledCacheClient, context.Background(), 100, keys)
@@ -199,8 +221,10 @@ func TestMGetCache(t *testing.T) {
 				t.Fatalf("unexpected response %v %v", v, err)
 			}
 			for _, key := range keys {
-				if vKey, ok := v[key]; !ok || vKey.string() != key {
-					t.Fatalf("unexpected response %v", v)
+				if vKey, ok := v[key]; !ok {
+					t.Fatalf("key %s not found in response %v", key, v)
+				} else if vKey.string() != key {
+					t.Fatalf("unexpected value for key %s: got %s, want %s", key, vKey.string(), key)
 				}
 			}
 		})
@@ -364,13 +388,35 @@ func TestMGet(t *testing.T) {
 			}
 			m.DoMultiFn = func(cmd ...Completed) *redisresults {
 				result := make([]RedisResult, len(cmd))
-				for i, key := range keys {
-					if !reflect.DeepEqual(cmd[i].Commands(), []string{"GET", key}) {
-						t.Fatalf("unexpected command %v", cmd)
+				// Track which keys we've seen to ensure all keys are present
+				seenKeys := make(map[string]bool)
+				
+				for i, c := range cmd {
+					// Each command should be an MGET with one or more keys
+					cmdParts := c.Commands()
+					if cmdParts[0] != "MGET" {
+						t.Fatalf("expected MGET command, got %v", cmdParts[0])
 						return nil
 					}
-					result[i] = newResult(strmsg('+', key), nil)
+					
+					// Build response array for this MGET
+					mgetKeys := cmdParts[1:]
+					arr := make([]RedisMessage, len(mgetKeys))
+					for j, key := range mgetKeys {
+						arr[j] = strmsg('+', key)
+						seenKeys[key] = true
+					}
+					result[i] = newResult(slicemsg('*', arr), nil)
 				}
+				
+				// Ensure all keys were seen
+				for _, key := range keys {
+					if !seenKeys[key] {
+						t.Fatalf("key %s was not included in any MGET command", key)
+						return nil
+					}
+				}
+				
 				return &redisresults{s: result}
 			}
 			v, err := MGet(client, context.Background(), keys)
@@ -378,8 +424,10 @@ func TestMGet(t *testing.T) {
 				t.Fatalf("unexpected response %v %v", v, err)
 			}
 			for _, key := range keys {
-				if vKey, ok := v[key]; !ok || vKey.string() != key {
-					t.Fatalf("unexpected response %v", v)
+				if vKey, ok := v[key]; !ok {
+					t.Fatalf("key %s not found in response, got %d keys", key, len(v))
+				} else if vKey.string() != key {
+					t.Fatalf("unexpected value for key %s: got %s, want %s", key, vKey.string(), key)
 				}
 			}
 		})
@@ -1168,13 +1216,42 @@ func TestJsonMGet(t *testing.T) {
 			}
 			m.DoMultiFn = func(cmd ...Completed) *redisresults {
 				result := make([]RedisResult, len(cmd))
-				for i, key := range keys {
-					if !reflect.DeepEqual(cmd[i].Commands(), []string{"JSON.GET", key, "$"}) {
-						t.Fatalf("unexpected command %v", cmd)
+				// Track which keys we've seen to ensure all keys are present
+				seenKeys := make(map[string]bool)
+				
+				for i, c := range cmd {
+					// Each command should be a JSON.MGET with one or more keys
+					cmdParts := c.Commands()
+					if cmdParts[0] != "JSON.MGET" {
+						t.Fatalf("expected JSON.MGET command, got %v", cmdParts[0])
 						return nil
 					}
-					result[i] = newResult(strmsg('+', key), nil)
+					
+					// Path should be the last element
+					if cmdParts[len(cmdParts)-1] != "$" {
+						t.Fatalf("expected path $ at end, got %v", cmdParts)
+						return nil
+					}
+					
+					// Build response array for this JSON.MGET
+					// Keys are between command name and path
+					mgetKeys := cmdParts[1 : len(cmdParts)-1]
+					arr := make([]RedisMessage, len(mgetKeys))
+					for j, key := range mgetKeys {
+						arr[j] = strmsg('+', key)
+						seenKeys[key] = true
+					}
+					result[i] = newResult(slicemsg('*', arr), nil)
 				}
+				
+				// Ensure all keys were seen
+				for _, key := range keys {
+					if !seenKeys[key] {
+						t.Fatalf("key %s was not included in any JSON.MGET command", key)
+						return nil
+					}
+				}
+				
 				return &redisresults{s: result}
 			}
 			v, err := JsonMGet(client, context.Background(), keys, "$")
@@ -1665,4 +1742,191 @@ func TestScannerIter2(t *testing.T) {
 			t.Errorf("unexpected error: %v", scanner.Err())
 		}
 	})
+}
+
+// TestMGetClusterSlotGrouping tests the slot-grouping optimization for cluster clients
+func TestMGetClusterSlotGrouping(t *testing.T) {
+defer ShouldNotLeak(SetupLeakDetection())
+
+m := &mockConn{
+DoFn: func(cmd Completed) RedisResult {
+return slotsResp
+},
+}
+client, err := newClusterClient(
+&ClientOption{InitAddress: []string{":0"}},
+func(dst string, opt *ClientOption) conn { return m },
+newRetryer(defaultRetryDelayFn),
+)
+if err != nil {
+t.Fatalf("unexpected err %v", err)
+}
+
+t.Run("Keys in same slot use single MGET", func(t *testing.T) {
+// Hash tags ensure all keys map to the same slot
+keys := []string{"{slot1}key1", "{slot1}key2", "{slot1}key3"}
+
+m.DoMultiFn = func(cmd ...Completed) *redisresults {
+// Should only issue one MGET command for all keys in same slot
+if len(cmd) != 1 {
+t.Fatalf("expected 1 MGET command, got %d", len(cmd))
+}
+
+cmdParts := cmd[0].Commands()
+if cmdParts[0] != "MGET" {
+t.Fatalf("expected MGET command, got %v", cmdParts[0])
+}
+
+// Verify all keys are in the command
+if len(cmdParts)-1 != len(keys) {
+t.Fatalf("expected %d keys in MGET, got %d", len(keys), len(cmdParts)-1)
+}
+
+// Build response
+arr := make([]RedisMessage, len(keys))
+for i, key := range keys {
+arr[i] = strmsg('+', key)
+}
+
+return &redisresults{s: []RedisResult{newResult(slicemsg('*', arr), nil)}}
+}
+
+v, err := MGet(client, context.Background(), keys)
+if err != nil {
+t.Fatalf("unexpected error %v", err)
+}
+
+// Verify all keys are present
+for _, key := range keys {
+if val, ok := v[key]; !ok {
+t.Fatalf("key %s not found in result", key)
+} else if val.string() != key {
+t.Fatalf("unexpected value for key %s: got %s, want %s", key, val.string(), key)
+}
+}
+})
+
+t.Run("Keys in different slots use multiple MGETs", func(t *testing.T) {
+// Different hash tags ensure keys map to different slots
+keys := []string{"{slot1}key1", "{slot2}key2", "{slot3}key3"}
+
+m.DoMultiFn = func(cmd ...Completed) *redisresults {
+// Should issue multiple MGET commands, one per slot
+if len(cmd) < 2 {
+t.Fatalf("expected at least 2 MGET commands for different slots, got %d", len(cmd))
+}
+
+result := make([]RedisResult, len(cmd))
+seenKeys := make(map[string]bool)
+
+for i, c := range cmd {
+cmdParts := c.Commands()
+if cmdParts[0] != "MGET" {
+t.Fatalf("expected MGET command, got %v", cmdParts[0])
+}
+
+// Build response array for this MGET
+mgetKeys := cmdParts[1:]
+arr := make([]RedisMessage, len(mgetKeys))
+for j, key := range mgetKeys {
+arr[j] = strmsg('+', key)
+seenKeys[key] = true
+}
+result[i] = newResult(slicemsg('*', arr), nil)
+}
+
+// Verify all keys were seen
+for _, key := range keys {
+if !seenKeys[key] {
+t.Fatalf("key %s was not included in any MGET command", key)
+}
+}
+
+return &redisresults{s: result}
+}
+
+v, err := MGet(client, context.Background(), keys)
+if err != nil {
+t.Fatalf("unexpected error %v", err)
+}
+
+// Verify all keys are present
+for _, key := range keys {
+if val, ok := v[key]; !ok {
+t.Fatalf("key %s not found in result", key)
+} else if val.string() != key {
+t.Fatalf("unexpected value for key %s: got %s, want %s", key, val.string(), key)
+}
+}
+})
+}
+
+// TestJsonMGetClusterSlotGrouping tests the slot-grouping optimization for JSON.MGET with cluster clients
+func TestJsonMGetClusterSlotGrouping(t *testing.T) {
+defer ShouldNotLeak(SetupLeakDetection())
+
+m := &mockConn{
+DoFn: func(cmd Completed) RedisResult {
+return slotsResp
+},
+}
+client, err := newClusterClient(
+&ClientOption{InitAddress: []string{":0"}},
+func(dst string, opt *ClientOption) conn { return m },
+newRetryer(defaultRetryDelayFn),
+)
+if err != nil {
+t.Fatalf("unexpected err %v", err)
+}
+
+path := "$"
+
+t.Run("Keys in same slot use single JSON.MGET", func(t *testing.T) {
+// Hash tags ensure all keys map to the same slot
+keys := []string{"{slot1}key1", "{slot1}key2", "{slot1}key3"}
+
+m.DoMultiFn = func(cmd ...Completed) *redisresults {
+// Should only issue one JSON.MGET command for all keys in same slot
+if len(cmd) != 1 {
+t.Fatalf("expected 1 JSON.MGET command, got %d", len(cmd))
+}
+
+cmdParts := cmd[0].Commands()
+if cmdParts[0] != "JSON.MGET" {
+t.Fatalf("expected JSON.MGET command, got %v", cmdParts[0])
+}
+
+// Verify path is at the end
+if cmdParts[len(cmdParts)-1] != path {
+t.Fatalf("expected path %s at end, got %v", path, cmdParts[len(cmdParts)-1])
+}
+
+// Verify all keys are in the command (between command name and path)
+if len(cmdParts)-2 != len(keys) {
+t.Fatalf("expected %d keys in JSON.MGET, got %d", len(keys), len(cmdParts)-2)
+}
+
+// Build response
+arr := make([]RedisMessage, len(keys))
+for i, key := range keys {
+arr[i] = strmsg('+', key)
+}
+
+return &redisresults{s: []RedisResult{newResult(slicemsg('*', arr), nil)}}
+}
+
+v, err := JsonMGet(client, context.Background(), keys, path)
+if err != nil {
+t.Fatalf("unexpected error %v", err)
+}
+
+// Verify all keys are present
+for _, key := range keys {
+if val, ok := v[key]; !ok {
+t.Fatalf("key %s not found in result", key)
+} else if val.string() != key {
+t.Fatalf("unexpected value for key %s: got %s, want %s", key, val.string(), key)
+}
+}
+})
 }
