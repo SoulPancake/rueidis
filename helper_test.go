@@ -423,7 +423,6 @@ func TestMGet(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected response %v %v", v, err)
 			}
-			t.Logf("Result has %d keys, expected %d", len(v), len(keys))
 			for _, key := range keys {
 				if vKey, ok := v[key]; !ok {
 					t.Fatalf("key %s not found in response, got %d keys", key, len(v))
