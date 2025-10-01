@@ -50,12 +50,8 @@ func MGet(client Client, ctx context.Context, keys []string) (ret map[string]Red
 		return clientMGet(client, ctx, client.B().Mget().Key(keys...).Build(), keys)
 	}
 
-	cmds := mgetcmdsp.Get(len(keys), len(keys))
-	defer mgetcmdsp.Put(cmds)
-	for i := range cmds.s {
-		cmds.s[i] = client.B().Get().Key(keys[i]).Build()
-	}
-	return doMultiGet(client, ctx, cmds.s, keys)
+	// For cluster clients, group keys by slot and issue MGET per slot
+	return clusterMGet(client, ctx, keys)
 }
 
 // MSet is a helper that consults the redis directly with multiple keys by grouping keys within the same slot into MSETs or multiple SETs
@@ -139,12 +135,8 @@ func JsonMGet(client Client, ctx context.Context, keys []string, path string) (r
 		return clientMGet(client, ctx, client.B().JsonMget().Key(keys...).Path(path).Build(), keys)
 	}
 
-	cmds := mgetcmdsp.Get(len(keys), len(keys))
-	defer mgetcmdsp.Put(cmds)
-	for i := range cmds.s {
-		cmds.s[i] = client.B().JsonGet().Key(keys[i]).Path(path).Build()
-	}
-	return doMultiGet(client, ctx, cmds.s, keys)
+	// For cluster clients, group keys by slot and issue JSON.MGET per slot
+	return clusterJsonMGet(client, ctx, keys, path)
 }
 
 // JsonMSet is a helper that consults redis directly with multiple keys by grouping keys within the same slot into JSON.MSETs or multiple JSON.SETs
@@ -268,6 +260,105 @@ func doMultiSet(cc Client, ctx context.Context, cmds []Completed) (ret map[strin
 	}
 	resultsp.Put(&redisresults{s: resps})
 	return ret
+}
+
+func clusterMGet(cc Client, ctx context.Context, keys []string) (ret map[string]RedisMessage, err error) {
+	// Group keys by their hash slots
+	slots := intl.MGets(keys)
+	
+	// Build a list of commands and track which keys belong to each command
+	cmds := make([]Completed, 0, len(slots))
+	cmdKeys := make([][]string, 0, len(slots))
+	
+	for _, cmd := range slots {
+		cmds = append(cmds, cmd)
+		// Extract keys from the MGET command (skip the "MGET" part)
+		// Make a copy to avoid issues with the slice being reused
+		keysInCmd := cmd.Commands()[1:]
+		keysCopy := make([]string, len(keysInCmd))
+		copy(keysCopy, keysInCmd)
+		cmdKeys = append(cmdKeys, keysCopy)
+	}
+	
+	// Execute all MGET commands in a single DoMulti call
+	ret = make(map[string]RedisMessage, len(keys))
+	resps := cc.DoMulti(ctx, cmds...)
+	defer resultsp.Put(&redisresults{s: resps})
+	
+	// Process results and map them back to keys
+	for i, resp := range resps {
+		if err := resp.NonRedisError(); err != nil {
+			return nil, err
+		}
+		
+		// Get the array response from MGET
+		arr, err := resp.ToArray()
+		if err != nil {
+			return nil, err
+		}
+		
+		// Map each result to its corresponding key
+		mgetKeys := cmdKeys[i]
+		if len(arr) != len(mgetKeys) {
+			// This should not happen - MGET should return same number of results as keys
+			return nil, errors.New("MGET response length mismatch")
+		}
+		for j, val := range arr {
+			ret[mgetKeys[j]] = val
+		}
+	}
+	
+	return ret, nil
+}
+
+func clusterJsonMGet(cc Client, ctx context.Context, keys []string, path string) (ret map[string]RedisMessage, err error) {
+	// Group keys by their hash slots
+	slots := intl.JsonMGets(keys, path)
+	
+	// Build a list of commands and track which keys belong to each command
+	cmds := make([]Completed, 0, len(slots))
+	cmdKeys := make([][]string, 0, len(slots))
+	
+	for _, cmd := range slots {
+		cmds = append(cmds, cmd)
+		// Extract keys from the JSON.MGET command (skip "JSON.MGET" and path at the end)
+		// JSON.MGET key1 key2 ... path
+		cmdParts := cmd.Commands()
+		keysInCmd := cmdParts[1 : len(cmdParts)-1]
+		keysCopy := make([]string, len(keysInCmd))
+		copy(keysCopy, keysInCmd)
+		cmdKeys = append(cmdKeys, keysCopy)
+	}
+	
+	// Execute all JSON.MGET commands in a single DoMulti call
+	ret = make(map[string]RedisMessage, len(keys))
+	resps := cc.DoMulti(ctx, cmds...)
+	defer resultsp.Put(&redisresults{s: resps})
+	
+	// Process results and map them back to keys
+	for i, resp := range resps {
+		if err := resp.NonRedisError(); err != nil {
+			return nil, err
+		}
+		
+		// Get the array response from JSON.MGET
+		arr, err := resp.ToArray()
+		if err != nil {
+			return nil, err
+		}
+		
+		// Map each result to its corresponding key
+		mgetKeys := cmdKeys[i]
+		if len(arr) != len(mgetKeys) {
+			// This should not happen - JSON.MGET should return same number of results as keys
+			return nil, errors.New("JSON.MGET response length mismatch")
+		}
+		for j, val := range arr {
+			ret[mgetKeys[j]] = val
+		}
+	}
+	
+	return ret, nil
 }
 
 func arrayToKV(m map[string]RedisMessage, arr []RedisMessage, keys []string) map[string]RedisMessage {
