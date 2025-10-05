@@ -72,13 +72,13 @@ func ReplaceSpaces(s string) string {
 	var builder strings.Builder
 	builder.Grow(len(s))
 
-	for _, char := range s {
-		if char == ' ' {
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' {
 			// Replace space with a hyphen.
-			builder.WriteRune('-')
+			builder.WriteByte('-')
 		} else {
 			// Copy the character as-is.
-			builder.WriteRune(char)
+			builder.WriteByte(s[i])
 		}
 	}
 
